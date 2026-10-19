@@ -53,6 +53,11 @@ full = [
     "swe-rex>=1.4.0",
     "mini-swe-agent[modal]",
     "mini-swe-agent[contree]",
+    "mini-swe-agent[fold]",
+]
+
+fold = [
+    "tree-sitter-language-pack>=1.22",
 ]
 
 modal = [

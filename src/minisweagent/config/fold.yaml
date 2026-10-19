@@ -1,0 +1,5 @@
+# Overlay config: fold overflowing code reads to symbol signatures.
+# Usage: mini -c mini.yaml -c fold.yaml
+# Requires: pip install 'mini-swe-agent[fold]'
+agent:
+  agent_class: fold
