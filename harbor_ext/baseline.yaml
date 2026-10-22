@@ -1,0 +1,4 @@
+agent:
+  agent_class: astshell
+  ast_shell:
+    enabled: false

@@ -81,6 +81,11 @@ contree = [
     "contree-sdk>=0.2.0",
 ]
 
+astshell = [
+    "tree-sitter>=0.23",
+    "tree-sitter-language-pack",
+]
+
 [project.urls]
 Documentation = "https://mini-swe-agent.com/latest/"
 Repository = "https://github.com/SWE-agent/mini-swe-agent"
