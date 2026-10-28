@@ -53,6 +53,7 @@ full = [
     "swe-rex>=1.4.0",
     "mini-swe-agent[modal]",
     "mini-swe-agent[contree]",
+    "mini-swe-agent[feedback]",
 ]
 
 modal = [
@@ -79,6 +80,11 @@ dev = [
 
 contree = [
     "contree-sdk>=0.2.0",
+]
+
+feedback = [
+    "tree-sitter>=0.23",
+    "tree-sitter-language-pack",
 ]
 
 [project.urls]
