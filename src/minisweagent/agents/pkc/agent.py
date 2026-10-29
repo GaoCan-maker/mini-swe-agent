@@ -394,15 +394,15 @@ class PKCAgent(DefaultAgent):
     def _break_even(self, plan: FoldPlan, ws: WorkingSet, frozen: str) -> bool:
         min_gain = self.pc.min_gain * (2 if self._pff_high() else 1)
         R = plan.saved_chars / self.cpt
-        if R < min_gain:
-            return False
-        if not self.pc.break_even:
-            return True
-        h, w = self.pc.hit_ratio, self.pc.write_ratio
         replaced = (
             len(self.keyframes[-1].ws.text) - 200 if self.keyframes and self.keyframes[-1].superseded is None else 0
         )
         W = (len(frozen) + len(ws.text) + len(FOOTER) - replaced) / self.cpt
+        if R - W < min_gain:
+            return False
+        if not self.pc.break_even:
+            return True
+        h, w = self.pc.hit_ratio, self.pc.write_ratio
         P = self.prompt_tokens or sum(map(_chars, self.messages)) / self.cpt
         pos = self._position(plan) / self.cpt
         return (R - W) * h * self.n_calls >= (w - h) * max(0.0, P - R - pos) + max(0.0, W) * (1 - h)

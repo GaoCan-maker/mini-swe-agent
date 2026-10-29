@@ -66,12 +66,19 @@ def search_summary(text: str, limit: int) -> tuple[int, str]:
     return total, "; ".join(parts) + (f" (+{total - shown})" if total > shown else "")
 
 
+def _separator(seg: Segment) -> str | None:
+    """Text printed by an `echo`/`printf` separator segment, as it appears on its output line."""
+    if not (m := ECHO.match(seg.text)) or "%" in m.group(2):
+        return None
+    return re.sub(r"\\[nt]", " ", m.group(2)).strip() or None
+
+
 def split_parts(rec: Record) -> list[Part] | None:
     cats = {s.category for s in rec.segments if s.category not in ("other", "git", "edit")}
-    if len(cats) < 2:
+    if len(cats) < 2 and sum(1 for s in rec.segments if s.read) < 2:
         return None
     lines = rec.raw.splitlines(keepends=True)
-    seps = {m.group(2).strip() for s in rec.segments if (m := ECHO.match(s.text)) and "%" not in m.group(2)}
+    seps = {sep for s in rec.segments if (sep := _separator(s))}
     groups: list[list[str]] = []
     segs: list[list[Segment]] = [[]]
     if seps and any(line.strip() in seps for line in lines):
@@ -80,7 +87,7 @@ def split_parts(rec: Record) -> list[Part] | None:
                 groups.append([])
             groups[-1].append(line)
         for s in rec.segments:
-            if (m := ECHO.match(s.text)) and m.group(2).strip() in seps:
+            if _separator(s) in seps:
                 segs.append([])
             else:
                 segs[-1].append(s)
@@ -173,16 +180,26 @@ class Planner:
 
     def _fold_read(self, rec: Record, pid: str, text: str, path: str) -> str | None:
         labels = self.labels
-        if path in labels.hot:
+        whole = pid == rec.id
+        paths = rec.read_paths if whole else [path]
+        if any(p in labels.hot for p in paths):
             return None
         mine = next((s.read for s in rec.segments if s.read and s.read[0] == path), (path, 1, None))
-        later = next(
-            (r for r in self.records if r.oid > rec.oid and any(s.read and _covered(mine, s.read) for s in r.segments)),
-            None,
-        )
-        if later is not None:
-            return f"[{pid} superseded by {later.id}] {short(rec.cmd)} | ctx show {pid}"
-        if path in labels.exemplars and labels.exemplar_mode == "keep":
+        reads = [s.read for s in rec.segments if s.read] if whole else [mine]
+        later = [
+            next(
+                (
+                    r
+                    for r in self.records
+                    if r.oid > rec.oid and any(s.read and _covered(m, s.read) for s in r.segments)
+                ),
+                None,
+            )
+            for m in reads
+        ]
+        if reads and all(later):
+            return f"[{pid} superseded by {max(later, key=lambda r: r.oid).id}] {short(rec.cmd)} | ctx show {pid}"
+        if labels.exemplar_mode == "keep" and any(p in labels.exemplars for p in paths):
             return None
         is_target = path in labels.targets
         same_dir = any(t.rpartition("/")[0] == path.rpartition("/")[0] for t in labels.targets)

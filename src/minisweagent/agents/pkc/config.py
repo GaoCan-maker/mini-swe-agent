@@ -26,7 +26,7 @@ class PKCConfig(BaseModel):
     min_steps: int = 10
     min_gap: int = 5
     min_gain: int = 1500
-    """Minimum number of tokens a fold must remove."""
+    """Minimum net number of tokens a fold must remove (removed tokens minus the added keyframe)."""
     keep_turns: int = 3
     e1_checkpoint: bool = True
     fold_edit_commands: bool = True
@@ -34,6 +34,7 @@ class PKCConfig(BaseModel):
     """Only fold edit commands longer than this."""
     exemplar_mode: Literal["working_set", "keep"] = "working_set"
     break_even: bool = True
+    """Also require the fold to pay off under prompt caching. Disable to minimize context tokens instead of cost."""
     hit_ratio: float = 0.1
     write_ratio: float = 1.0
     """Cache write price relative to an uncached input token (1.25 for Anthropic)."""

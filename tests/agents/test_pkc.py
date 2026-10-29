@@ -7,7 +7,7 @@ import pytest
 from minisweagent.agents.pkc import PKCAgent, commands
 from minisweagent.agents.pkc import ctx as pkc_ctx
 from minisweagent.agents.pkc.commands import is_green, parse_command
-from minisweagent.agents.pkc.fold import split_parts
+from minisweagent.agents.pkc.fold import Labels, Planner, split_parts
 from minisweagent.agents.pkc.keyframe import Candidate, build_working_set
 from minisweagent.agents.pkc.ledger import Ledger
 from minisweagent.agents.pkc.notes import NoteContext, validate
@@ -157,6 +157,25 @@ def test_split_parts_by_echo_separator():
     assert ledger.restore_text("o0.2") == "=== B\nsrc/b.py:3:foo()\n"
 
 
+def test_split_parts_by_printf_separator():
+    cmd = "sed -n '1,3p' a.go && printf '\\n--- main.go ---\\n' && cat main.go"
+    out = "package a\n\nfunc A() {}\n\n--- main.go ---\npackage main\n"
+    rec = Ledger().add(1, {"command": cmd}, {"output": out, "returncode": 0}, "")
+    assert [(p.category, p.path) for p in split_parts(rec)] == [("read", "a.go"), ("read", "main.go")]
+
+
+def test_read_is_superseded_only_when_every_file_is_reread():
+    ledger = Ledger()
+    first = ledger.add(1, {"command": "cat a.py; cat b.py"}, {"output": "x = 1\n" * 300, "returncode": 0}, "")
+    assert first.read_paths == ["a.py", "b.py"]
+    ledger.add(2, {"command": "cat a.py"}, {"output": "x = 1\n", "returncode": 0}, "")
+    stub = Planner(ledger.records, Labels(has_exemplars=True), 8, 15, {})._fold_output(first)
+    assert stub.startswith("[o0 folded]")
+    ledger.add(3, {"command": "cat b.py"}, {"output": "x = 1\n", "returncode": 0}, "")
+    stub = Planner(ledger.records, Labels(has_exemplars=True), 8, 15, {})._fold_output(first)
+    assert stub.startswith("[o0 superseded by o2]")
+
+
 def test_ctx_refs():
     assert pkc_ctx.refs("ctx show o12 | head -5 && ctx show '#e3'") == (["o12", "e3"], False)
     assert pkc_ctx.refs("for i in o1 o2; do ctx show $i; done")[1]
@@ -210,7 +229,7 @@ def _git_repo(path):
     (path / "pkg").mkdir(parents=True)
     (path / "tests").mkdir()
     (path / "pkg" / "core.py").write_text(ORIGINAL)
-    (path / "pkg" / "big.py").write_text(ORIGINAL)
+    (path / "pkg" / "big.py").write_text(ORIGINAL * 3)
     (path / "tests" / "test_core.py").write_text("def test_add():\n    pass\n")
     for cmd in (["init", "-q"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"]):
         subprocess.run(["git", *cmd], cwd=path, check=True)
@@ -243,7 +262,7 @@ def test_pkc_end_to_end(tmp_path, make_model):
     pkc = {
         "min_steps": 1,
         "min_gap": 1,
-        "min_gain": 10,
+        "min_gain": -100_000,
         "keep_turns": 1,
         "break_even": False,
         "edit_stub_min_chars": 50,
@@ -298,6 +317,26 @@ def test_pkc_end_to_end(tmp_path, make_model):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="ctx is a POSIX sh script")
+def test_no_fold_when_keyframe_costs_more_than_it_removes(tmp_path):
+    repo = tmp_path / "repo"
+    _git_repo(repo)
+    # The first-green fold removes ~1050 tokens but its keyframe adds ~350.
+    pkc = {"min_steps": 1, "min_gap": 1, "min_gain": 900, "keep_turns": 1, "break_even": False}
+    agent = PKCAgent(
+        _text_model(),
+        LocalEnvironment(cwd=str(repo)),
+        system_template="s",
+        instance_template="{{task}}",
+        cost_limit=0,
+        pkc=pkc | {"ctx": {"dir": str(tmp_path / "pkc")}},
+    )
+    agent.run("t")
+    assert agent.g1_step == 4
+    assert agent.keyframes == [] and agent.stats["skipped_break_even"] == 1
+    assert all("<delta>" not in m.get("content", "") for m in agent.messages if m["role"] == "user")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="ctx is a POSIX sh script")
 def test_second_keyframe_supersedes_working_set(tmp_path):
     repo = tmp_path / "repo"
     _git_repo(repo)
@@ -310,7 +349,7 @@ def test_second_keyframe_supersedes_working_set(tmp_path):
         ("Done.", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"),
     ]
     outputs = [make_output(f"{t}\n\n```mswea_bash_command\n{c}\n```", [{"command": c}]) for t, c in steps]
-    pkc = {"min_steps": 1, "min_gap": 1, "min_gain": 10, "keep_turns": 1, "break_even": False}
+    pkc = {"min_steps": 1, "min_gap": 1, "min_gain": 0, "keep_turns": 1, "break_even": False}
     agent = PKCAgent(
         DeterministicModel(outputs=outputs),
         LocalEnvironment(cwd=str(repo)),
