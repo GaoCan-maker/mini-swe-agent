@@ -46,10 +46,19 @@ def _set_cache_control(entry: dict) -> None:
         entry["cache_control"] = {"type": "ephemeral"}
 
 
+def cache_breakpoints(messages: list[dict]) -> list[int]:
+    """Indices of messages that an agent flagged with `extra.cache_breakpoint`."""
+    return [i for i, m in enumerate(messages) if m.get("extra", {}).get("cache_breakpoint")]
+
+
 def set_cache_control(
-    messages: list[dict], *, mode: Literal["default_end"] | None = "default_end", last_n_messages_offset: int = 0
+    messages: list[dict],
+    *,
+    mode: Literal["default_end"] | None = "default_end",
+    last_n_messages_offset: int = 0,
+    breakpoints: list[int] | None = None,
 ) -> list[dict]:
-    """This messages processor adds manual cache control marks to the messages."""
+    """This messages processor adds manual cache control marks to the last message and to `breakpoints`."""
     if mode is None:
         return messages
     if mode != "default_end":
@@ -58,10 +67,9 @@ def set_cache_control(
         warnings.warn("last_n_messages_offset is deprecated and will be removed in the future. It has no effect.")
 
     messages = copy.deepcopy(messages)
-    new_messages = []
-    for i_entry, entry in enumerate(reversed(messages)):
+    marked = {len(messages) - 1, *(breakpoints or [])}
+    for i_entry, entry in enumerate(messages):
         _clear_cache_control(entry)
-        if i_entry == 0:
+        if i_entry in marked:
             _set_cache_control(entry)
-        new_messages.append(entry)
-    return list(reversed(new_messages))
+    return messages

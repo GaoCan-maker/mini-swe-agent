@@ -15,7 +15,7 @@ from minisweagent.models.utils.actions_toolcall import (
     parse_toolcall_actions,
 )
 from minisweagent.models.utils.anthropic_utils import _reorder_anthropic_thinking_blocks
-from minisweagent.models.utils.cache_control import set_cache_control
+from minisweagent.models.utils.cache_control import cache_breakpoints, set_cache_control
 from minisweagent.models.utils.openai_multimodal import expand_multimodal_content
 from minisweagent.models.utils.retry import retry
 
@@ -97,7 +97,7 @@ class RequestyModel:
     def _prepare_messages_for_api(self, messages: list[dict]) -> list[dict]:
         prepared = [{k: v for k, v in msg.items() if k != "extra"} for msg in messages]
         prepared = _reorder_anthropic_thinking_blocks(prepared)
-        return set_cache_control(prepared, mode=self.config.set_cache_control)
+        return set_cache_control(prepared, mode=self.config.set_cache_control, breakpoints=cache_breakpoints(messages))
 
     def query(self, messages: list[dict[str, str]], **kwargs) -> dict:
         for attempt in retry(logger=logger, abort_exceptions=self.abort_exceptions):

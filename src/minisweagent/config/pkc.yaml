@@ -1,0 +1,29 @@
+# Phase-Keyframe Compaction. Layer on top of another config, e.g.
+#   mini-extra swebench -c swebench.yaml -c pkc.yaml ...
+agent:
+  agent_class: pkc
+  pkc:
+    enabled: true
+    triggers: [first_green, new_target, revert]
+    min_steps: 10
+    min_gap: 5
+    min_gain: 1500
+    keep_turns: 3
+    e1_checkpoint: true
+    fold_edit_commands: true
+    exemplar_mode: working_set
+    break_even: true
+    hit_ratio: 0.1
+    write_ratio: 1.0  # set to 1.25 for Anthropic
+    ws_budget: 8000
+    ws_symbol_max_lines: 150
+    checkpoint_max_tokens: 400
+    delta_max_tokens: 300
+    ctx:
+      dir: /tmp/.pkc
+    hot:
+      restore_count: 2
+      restore_window: 10
+      reread_window: 5
+      pff_max: 3
+      disable_after: 10
