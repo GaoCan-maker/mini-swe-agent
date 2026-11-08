@@ -223,6 +223,14 @@ STEPS = [
     ("Done.", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"),
 ]
 JSON_TEMPLATE = '{"returncode": {{ output.returncode }}, "output": {{ output.output | tojson }}}'
+# Phase-event scheduling without the size gate, burst deferral and recency keep.
+LEGACY = {
+    "checkpoint_at": "e1",
+    "min_prompt_tokens": 0,
+    "pressure_prompt_tokens": 0,
+    "defer_edit_burst": False,
+    "keep_recent_steps": 0,
+}
 
 
 def _git_repo(path):
@@ -259,12 +267,11 @@ def _toolcall_model():
 def test_pkc_end_to_end(tmp_path, make_model):
     repo = tmp_path / "repo"
     _git_repo(repo)
-    pkc = {
+    pkc = LEGACY | {
         "min_steps": 1,
         "min_gap": 1,
         "min_gain": -100_000,
         "keep_turns": 1,
-        "break_even": False,
         "edit_stub_min_chars": 50,
     }
     agent = PKCAgent(
@@ -321,7 +328,7 @@ def test_no_fold_when_keyframe_costs_more_than_it_removes(tmp_path):
     repo = tmp_path / "repo"
     _git_repo(repo)
     # The first-green fold removes ~1050 tokens but its keyframe adds ~350.
-    pkc = {"min_steps": 1, "min_gap": 1, "min_gain": 900, "keep_turns": 1, "break_even": False}
+    pkc = LEGACY | {"min_steps": 1, "min_gap": 1, "min_gain": 900, "keep_turns": 1}
     agent = PKCAgent(
         _text_model(),
         LocalEnvironment(cwd=str(repo)),
@@ -332,7 +339,7 @@ def test_no_fold_when_keyframe_costs_more_than_it_removes(tmp_path):
     )
     agent.run("t")
     assert agent.g1_step == 4
-    assert agent.keyframes == [] and agent.stats["skipped_break_even"] == 1
+    assert agent.keyframes == [] and agent.stats["skipped_min_gain"] == 1
     assert all("<delta>" not in m.get("content", "") for m in agent.messages if m["role"] == "user")
 
 
@@ -349,7 +356,7 @@ def test_second_keyframe_supersedes_working_set(tmp_path):
         ("Done.", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"),
     ]
     outputs = [make_output(f"{t}\n\n```mswea_bash_command\n{c}\n```", [{"command": c}]) for t, c in steps]
-    pkc = {"min_steps": 1, "min_gap": 1, "min_gain": 0, "keep_turns": 1, "break_even": False}
+    pkc = LEGACY | {"min_steps": 1, "min_gap": 1, "min_gain": 0, "keep_turns": 1}
     agent = PKCAgent(
         DeterministicModel(outputs=outputs),
         LocalEnvironment(cwd=str(repo)),
@@ -402,3 +409,144 @@ def test_ctx_symbol_restore_follows_file_changes(tmp_path):
     assert outs[0].split("\n")[0].split("\t") == ["    12", "def subtract(a, b):"]
     assert "[ranges recomputed after file change]" in outs[1] and "    13\tdef subtract(a, b):" in outs[1]
     assert outs[2] == "(nothing folded)\n"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="ctx is a POSIX sh script")
+def test_reasoning_of_folded_steps_becomes_stub_and_keeps_notes(tmp_path):
+    repo = tmp_path / "repo"
+    _git_repo(repo)
+    model = _toolcall_model()
+    for i, out in enumerate(model.config.outputs):
+        notes = STEPS[i][0] if "<" in STEPS[i][0] else ""
+        out["reasoning_content"] = f"step {i + 1} thinking " + "x" * 300 + notes
+    pkc = LEGACY | {"min_steps": 1, "min_gap": 1, "min_gain": -100_000, "keep_turns": 1}
+    agent = PKCAgent(
+        model,
+        LocalEnvironment(cwd=str(repo)),
+        system_template="s",
+        instance_template="{{task}}",
+        cost_limit=0,
+        pkc=pkc | {"ctx": {"dir": str(tmp_path / "pkc")}},
+    )
+    agent.run("t")
+    assert [k.step for k in agent.keyframes] == [5]
+    assert "older reasoning is shortened" in agent.messages[0]["content"]
+    thoughts = [m for m in agent.messages if m["role"] == "assistant"]
+    assert thoughts[0]["reasoning_content"] == "[reasoning of step 1 folded]"
+    assert "x" * 300 in thoughts[0]["extra"]["pkc_original_reasoning"]
+    assert thoughts[3]["reasoning_content"].startswith("[reasoning of step 4 folded]\n<checkpoint>")
+    assert "x" * 300 in thoughts[4]["reasoning_content"]
+    assert agent.stats["folded_reasoning"] == 4 and agent.stats["reasoning_saved_chars"] > 1000
+    assert agent.serialize()["info"]["pkc"]["keyframe_reasons"] == ["first_green"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="ctx is a POSIX sh script")
+def test_checkpoint_requested_with_first_delta(tmp_path):
+    repo = tmp_path / "repo"
+    _git_repo(repo)
+    steps = STEPS[:3] + [("Run the tests.", STEPS[3][1])] + STEPS[4:]
+    outputs = [make_output(f"{t}\n\n```mswea_bash_command\n{c}\n```", [{"command": c}]) for t, c in steps]
+    pkc = LEGACY | {"checkpoint_at": "first_fold", "min_steps": 1, "min_gap": 1, "min_gain": -100_000, "keep_turns": 1}
+    agent = PKCAgent(
+        DeterministicModel(outputs=outputs),
+        LocalEnvironment(cwd=str(repo)),
+        system_template="s",
+        instance_template="{{task}}",
+        cost_limit=0,
+        pkc=pkc | {"ctx": {"dir": str(tmp_path / "pkc")}},
+    )
+    agent.run("t")
+    obs = [r.obs_msg for r in agent.ledger.records if r.obs_msg is not None]
+    assert agent.e1_step == 3 and "<checkpoint>" not in obs[2]["content"]
+    assert "write both blocks" in obs[3]["content"] and "<checkpoint>" in obs[3]["content"]
+    assert agent.unanswered["checkpoint"] == 1 and agent.stats["deltas"] == 1
+    assert [k.step for k in agent.keyframes] == [5]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="ctx is a POSIX sh script")
+def test_pressure_folds_with_default_scheduling(tmp_path):
+    repo = tmp_path / "repo"
+    _git_repo(repo)
+    model = _text_model()
+    for out in model.config.outputs:
+        out["extra"]["response"] = {"usage": {"prompt_tokens": 150_000}}
+    agent = PKCAgent(
+        model,
+        LocalEnvironment(cwd=str(repo)),
+        system_template="s",
+        instance_template="{{task}}",
+        cost_limit=0,
+        pkc={
+            "min_steps": 1,
+            "min_gap": 1,
+            "min_gain": -100_000,
+            "keep_turns": 1,
+            "ctx": {"dir": str(tmp_path / "pkc")},
+        },
+    )
+    agent.run("t")
+    obs = [r.obs_msg for r in agent.ledger.records if r.obs_msg is not None]
+    assert "write both blocks" in obs[0]["content"]
+    assert [k.step for k in agent.keyframes] == [2, 5] and agent.kf_reasons == ["pressure", "first_green"]
+
+
+def _rec(ledger, step, cmd, edit_files=()):
+    rec = ledger.add(step, {"command": cmd}, {"output": "", "returncode": 0}, "")
+    rec.edit_files = list(edit_files)
+    return rec
+
+
+def test_fold_scheduling_gate_burst_deferral_and_pressure(tmp_path):
+    agent = PKCAgent(
+        DeterministicModel(outputs=[]),
+        LocalEnvironment(cwd=str(tmp_path)),
+        system_template="s",
+        instance_template="{{task}}",
+        pkc={"min_steps": 1, "min_gap": 1, "max_defer": 2},
+    )
+    edit = [_rec(agent.ledger, 20, "python3 - <<'PY'\nopen('a.py', 'w').write('x')\nPY", ["a.py"])]
+    calm = [_rec(agent.ledger, 21, "cat a.py")]
+    agent.prompt_tokens = 50_000
+    assert agent._due(20, calm, ["new_target"]) is None and agent.queued is None
+    agent.prompt_tokens = 70_000
+    assert agent._due(20, edit, ["new_target"]) is None and agent.queued == ("new_target", 20)
+    assert agent._due(21, calm, []) == "new_target" and agent.queued is None
+    assert agent._due(22, edit, ["first_green"]) is None
+    assert agent._due(25, calm, []) is None and agent.queued is None
+    agent.prompt_tokens = 120_000
+    assert agent._due(26, edit, []) is None
+    assert agent._due(27, [_rec(agent.ledger, 27, "pytest -q", ["a.py"])], []) == "pressure"
+
+
+def test_recent_paths_from_commands_and_reasoning(tmp_path):
+    agent = PKCAgent(
+        DeterministicModel(outputs=[]),
+        LocalEnvironment(cwd=str(tmp_path)),
+        system_template="s",
+        instance_template="{{task}}",
+    )
+    for step, cmd in ((1, "cat src/util.py"), (2, "cat src/other.py"), (3, "cat lib/x/index.ts; cat lib/y/index.ts")):
+        agent.ledger.add(step, {"command": cmd}, {"output": "", "returncode": 0}, "")
+    agent.step_msgs[2] = {"role": "assistant", "content": "", "reasoning_content": "other.py", "extra": {}}
+    agent.step_msgs[9] = {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": "util.py still matters, and index.ts",
+        "extra": {"actions": [{"command": "grep -n foo src/zzz.py"}]},
+    }
+    assert agent._recent_paths(10) == {"src/util.py"}
+
+
+def test_outline_kept_per_file_and_recent_reads_not_folded():
+    ledger = Ledger()
+    body = "def alpha():\n    return 1\n" + "x = 1\n" * 200
+    single = ledger.add(1, {"command": "cat a.py"}, {"output": body, "returncode": 0}, "")
+    multi = ledger.add(2, {"command": "cat b.py; cat c.py"}, {"output": body + body, "returncode": 0}, "")
+    planner = Planner(ledger.records, Labels(has_exemplars=True), 8, 15, {})
+    assert planner._fold_output(single).startswith("[o0 folded]")
+    assert planner._fold_output(multi).startswith("[o1 folded]")
+    assert single.outlines == {"a.py": [("alpha", 1, 202)]} and multi.outlines == {}
+    assert Planner(ledger.records, Labels(has_exemplars=True, recent={"a.py"}), 8, 15, {})._fold_output(single) is None
+    ledger.add(3, {"command": "cat a.py"}, {"output": body, "returncode": 0}, "")
+    stub = Planner(ledger.records, Labels(has_exemplars=True, recent={"a.py"}), 8, 15, {})._fold_output(single)
+    assert stub.startswith("[o0 superseded by o2]")

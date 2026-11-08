@@ -35,6 +35,8 @@ class Record:
     cmd_stub: str | None = None
     folded_at: int | None = None
     outline: list[tuple[str, int, int]] = field(default_factory=list)
+    outlines: dict[str, list[tuple[str, int, int]]] = field(default_factory=dict)
+    """Outline per read path, only for folded units that show a single file."""
 
     @property
     def id(self) -> str:

@@ -27,21 +27,36 @@ class PKCConfig(BaseModel):
     min_gap: int = 5
     min_gain: int = 1500
     """Minimum net number of tokens a fold must remove (removed tokens minus the added keyframe)."""
+    min_prompt_tokens: int = 64000
+    """Phase triggers are dropped while the prompt is smaller than this. 0 disables the gate."""
+    pressure_prompt_tokens: int = 100000
+    """Fold whenever the prompt reaches this size, independent of phase triggers. 0 disables."""
+    defer_edit_burst: bool = True
+    """Postpone a due fold while the agent is editing; fold at the first step without edits or with a test run."""
+    max_defer: int = 8
+    """Drop a postponed phase trigger after this many steps."""
     keep_turns: int = 3
-    e1_checkpoint: bool = True
+    keep_recent_steps: int = 5
+    """Do not fold reads of non-target files mentioned in the commands or reasoning of this many recent steps."""
+    checkpoint_at: Literal["e1", "first_fold", "never"] = "first_fold"
+    """When to ask for the <checkpoint>: at the first change (E1) or together with the first <delta>."""
     fold_edit_commands: bool = True
     edit_stub_min_chars: int = 400
     """Only fold edit commands longer than this."""
+    fold_reasoning: bool = True
+    """Replace the reasoning of folded steps by a one-line stub; <checkpoint>/<delta> blocks are kept."""
     exemplar_mode: Literal["working_set", "keep"] = "working_set"
-    break_even: bool = True
-    """Also require the fold to pay off under prompt caching. Disable to minimize context tokens instead of cost."""
+    break_even: bool = False
+    """Also require the fold to pay off under prompt caching. Leave off to minimize context tokens instead of cost."""
     hit_ratio: float = 0.1
     write_ratio: float = 1.0
     """Cache write price relative to an uncached input token (1.25 for Anthropic)."""
     chars_per_token: float = 3.5
     """Initial estimate; recalibrated from the API usage after every call."""
-    ws_budget: int = 8000
+    ws_budget: int = 4000
     ws_symbol_max_lines: int = 150
+    ws_hunk_context: int = 10
+    """Context lines around a changed region that lies outside any indexed symbol."""
     checkpoint_max_tokens: int = 400
     delta_max_tokens: int = 300
     search_hits_per_stub: int = 8

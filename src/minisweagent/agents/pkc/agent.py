@@ -4,11 +4,12 @@ import copy
 import json
 import re
 import shlex
+from collections import Counter
 
 from minisweagent import Environment, Model
 from minisweagent.agents.default import AgentConfig, DefaultAgent
 from minisweagent.agents.pkc import ctx
-from minisweagent.agents.pkc.commands import CTX_USE, REVERT, is_green, norm_path, test_key, test_summary
+from minisweagent.agents.pkc.commands import CTX_USE, PATH_RE, REVERT, is_green, norm_path, test_key, test_summary
 from minisweagent.agents.pkc.config import PKCConfig
 from minisweagent.agents.pkc.files import FileTracker
 from minisweagent.agents.pkc.fold import FoldPlan, Labels, Planner, search_summary, short
@@ -16,9 +17,10 @@ from minisweagent.agents.pkc.keyframe import FOOTER, Candidate, Keyframe, Workin
 from minisweagent.agents.pkc.ledger import Ledger, Record
 from minisweagent.agents.pkc.notes import FIELDS, Item, NoteContext, parse_block, parse_items, validate
 from minisweagent.agents.pkc.symbols import Symbol, find, index, strip_numbers, syntax_ok
-from minisweagent.agents.pkc.templates import T0, T1, T2, repeated_edit, reverted, t4
+from minisweagent.agents.pkc.templates import T0, T0_REASONING, T1, T2, T2_FIRST, repeated_edit, reverted, t4
 
 WORD = re.compile(r"[A-Za-z_]\w{3,}")
+NOTE_BLOCK = re.compile(r"<(checkpoint|delta)>.*?</\1>", re.S)
 
 
 class PKCAgentConfig(AgentConfig):
@@ -33,7 +35,11 @@ def _text(msg: dict) -> str:
 
 
 def _chars(msg: dict) -> int:
-    return len(_text(msg)) + sum(len(tc.get("function", {}).get("arguments", "")) for tc in msg.get("tool_calls") or [])
+    return (
+        len(_text(msg))
+        + len(msg.get("reasoning_content") or "")
+        + sum(len(tc.get("function", {}).get("arguments", "")) for tc in msg.get("tool_calls") or [])
+    )
 
 
 def _save_original(msg: dict) -> None:
@@ -55,11 +61,15 @@ class PKCAgent(DefaultAgent):
         self.deltas: list[tuple[int, list[Item]]] = []
         self.feedback: list[str] = []
         self.pending: tuple[str, int] | None = None
-        self.awaiting: str | None = None
+        self.queued: tuple[str, int] | None = None
+        self.awaiting: set[str] = set()
         self.unanswered = {"checkpoint": 0, "delta": 0}
         self.e1_step: int | None = None
         self.g1_step: int | None = None
         self.last_kf_step = 0
+        self.fold_hi = 0
+        self.kf_reasons: list[str] = []
+        self.step_msgs: dict[int, dict] = {}
         self.edited_targets: set[str] = set()
         self.step_cats: dict[int, set[str]] = {}
         self.restores: list[tuple[int, str, str | None]] = []
@@ -71,8 +81,21 @@ class PKCAgent(DefaultAgent):
         self.prompt_tokens = 0
         self.reported_stale: set[str] = set()
         self.stats = dict.fromkeys(
-            ["keyframes", "folded_outputs", "folded_edits", "saved_chars", "restores", "checkpoints", "deltas"], 0
-        ) | {"skipped_break_even": 0}
+            [
+                "keyframes",
+                "folded_outputs",
+                "folded_edits",
+                "folded_reasoning",
+                "saved_chars",
+                "reasoning_saved_chars",
+                "restores",
+                "checkpoints",
+                "deltas",
+                "skipped_min_gain",
+                "skipped_break_even",
+            ],
+            0,
+        )
 
     # ---- agent loop hooks ----
 
@@ -88,13 +111,15 @@ class PKCAgent(DefaultAgent):
             and first.get("role") == "system"
             and isinstance(first.get("content"), str)
         ):
-            messages = ({**messages[0], "content": messages[0]["content"] + "\n\n" + T0}, *messages[1:])
+            t0 = T0 + (T0_REASONING if self.pc.fold_reasoning else "")
+            messages = ({**messages[0], "content": messages[0]["content"] + "\n\n" + t0}, *messages[1:])
         return super().add_messages(*messages)
 
     def query(self) -> dict:
         if self.pc.enabled:
             self._mark_breakpoints()
         message = super().query()
+        self.step_msgs[self.n_calls] = message
         response = message.get("extra", {}).get("response")
         usage = (response.get("usage") or {}) if isinstance(response, dict) else {}
         if prompt_tokens := usage.get("prompt_tokens"):
@@ -128,6 +153,7 @@ class PKCAgent(DefaultAgent):
             "e1_step": self.e1_step,
             "g1_step": self.g1_step,
             "keyframe_steps": [k.step for k in self.keyframes],
+            "keyframe_reasons": self.kf_reasons,
             "hot_files": sorted(self.hot),
         }
         return super().serialize({"info": {"pkc": pkc}}, *extra_dicts)
@@ -242,7 +268,7 @@ class PKCAgent(DefaultAgent):
         text = _text(message) + "\n" + str(message.get("reasoning_content") or "")
         for kind, budget in (("checkpoint", self.pc.checkpoint_max_tokens), ("delta", self.pc.delta_max_tokens)):
             if (block := parse_block(text, kind)) is None:
-                if self.awaiting == kind:
+                if kind in self.awaiting:
                     self.unanswered[kind] += 1
                 continue
             self.unanswered[kind] = 0
@@ -256,7 +282,7 @@ class PKCAgent(DefaultAgent):
             self.stats[kind + "s"] += 1
             if problems:
                 self.feedback.append(t4(kind, problems))
-        self.awaiting = None
+        self.awaiting = set()
 
     def _cp(self, field: str) -> list[Item]:
         return [i for i in self.checkpoint if i.field == field]
@@ -274,25 +300,57 @@ class PKCAgent(DefaultAgent):
         targets = self.files.targets()
         if self.e1_step is None and any(self._is_e1(r, targets) for r in recs):
             self.e1_step = step
-            if self.pc.e1_checkpoint and self.unanswered["checkpoint"] < self.pc.max_unanswered_requests:
+            if self.pc.checkpoint_at == "e1" and self._may_ask("checkpoint"):
                 host.appendix.append(T1)
-                self.awaiting = "checkpoint"
+                self.awaiting.add("checkpoint")
         triggers = self._triggers(recs, step, targets)
+        folded = False
         if self.pending and step > self.pending[1]:
             self._fold(step, host, self.pending[0])
-            self.pending = None
-        elif triggers and self._throttle(step):
-            plan, ws, frozen = self._prepare(step, triggers[0])
-            if self._break_even(plan, ws, frozen):
-                self.pending = (triggers[0], step)
-                if self.unanswered["delta"] < self.pc.max_unanswered_requests:
-                    host.appendix.append(T2)
-                    self.awaiting = "delta"
-            else:
-                self.stats["skipped_break_even"] += 1
-                if self.keyframes and (stale := self._reverted_in_ws(recs)):
-                    host.appendix.append(reverted(stale, self.keyframes[-1].n))
+            self.pending, folded = None, True
+        elif reason := self._due(step, recs, triggers):
+            plan, ws, frozen = self._prepare(step, reason)
+            if self._worth_it(plan, ws, frozen):
+                self.pending = (reason, step)
+                self._request_notes(host)
+        if not folded and self.pending is None and self.keyframes and (stale := self._reverted_in_ws(recs)):
+            host.appendix.append(reverted(stale, self.keyframes[-1].n))
         host.render()
+
+    def _may_ask(self, kind: str) -> bool:
+        return self.unanswered[kind] < self.pc.max_unanswered_requests
+
+    def _request_notes(self, host: Record) -> None:
+        ask_cp = self.pc.checkpoint_at == "first_fold" and not self.checkpoint and self._may_ask("checkpoint")
+        if ask_cp:
+            host.appendix.append(T2_FIRST)
+            self.awaiting |= {"checkpoint", "delta"}
+        elif self._may_ask("delta"):
+            host.appendix.append(T2)
+            self.awaiting.add("delta")
+
+    def _context_tokens(self) -> float:
+        return self.prompt_tokens or sum(map(_chars, self.messages)) / self.cpt
+
+    def _due(self, step: int, recs: list[Record], triggers: list[str]) -> str | None:
+        """Reason for a fold that should be prepared now, if any."""
+        if triggers and self.queued is None:
+            self.queued = (triggers[0], step)
+        size = self._context_tokens()
+        if self.queued and (step - self.queued[1] > self.pc.max_defer or size < self.pc.min_prompt_tokens):
+            self.queued = None
+        pressure = 0 < self.pc.pressure_prompt_tokens <= size
+        reason = self.queued[0] if self.queued else "pressure" if pressure else None
+        if reason is None or not self._throttle(step):
+            return None
+        if self.pc.defer_edit_burst and not self._calm(recs):
+            return None
+        self.queued = None
+        return reason
+
+    @staticmethod
+    def _calm(recs: list[Record]) -> bool:
+        return any(r.category == "test" for r in recs) or not any(r.edit_files for r in recs)
 
     def _reverted_in_ws(self, recs: list[Record]) -> list[str]:
         shown = {s.split("::", 1)[0] for s in self.keyframes[-1].ws.symbols}
@@ -352,7 +410,22 @@ class PKCAgent(DefaultAgent):
 
     # ---- folding ----
 
-    def _labels(self) -> Labels:
+    def _recent_paths(self, step: int) -> set[str]:
+        """Read paths named in the commands or reasoning of the last `keep_recent_steps` steps."""
+        if self.pc.keep_recent_steps <= 0:
+            return set()
+        texts = []
+        for s in range(step - self.pc.keep_recent_steps + 1, step + 1):
+            if (m := self.step_msgs.get(s)) is not None:
+                texts += [_text(m), str(m.get("reasoning_content") or "")]
+                texts += [a.get("command", "") for a in m.get("extra", {}).get("actions", [])]
+        named = {self._path(p) for t in texts for p in PATH_RE.findall(t)}
+        read = {p for r in self.ledger.records for p in r.read_paths}
+        basenames = Counter(p.rsplit("/", 1)[-1] for p in read)
+        named_base = {p.rsplit("/", 1)[-1] for p in named}
+        return {p for p in read if p in named or (basenames[b := p.rsplit("/", 1)[-1]] == 1 and b in named_base)}
+
+    def _labels(self, step: int) -> Labels:
         ruled = {}
         for k, item in enumerate(self._cp("RULED_OUT")):
             for r in item.refs:
@@ -363,13 +436,15 @@ class PKCAgent(DefaultAgent):
                     ruled.setdefault(r.split(".")[0], f"delta{n + 1}.REJECTED[{k + 1}]")
         last_delta = self.deltas[-1][1] if self.deltas and self.deltas[-1][0] > self.last_kf_step else []
         exemplars = self._cp("EXEMPLARS")
+        targets = self.files.targets() | {p for i in self._cp("TARGETS") for p in i.paths}
         return Labels(
-            targets=self.files.targets() | {p for i in self._cp("TARGETS") for p in i.paths},
+            targets=targets,
             exemplars={p for i in exemplars for p in i.paths},
             has_exemplars=bool(exemplars),
             ruled_out=ruled,
             keep={r for i in last_delta if i.field == "KEEP" for r in i.refs},
             hot=set(self.hot),
+            recent=self._recent_paths(step) - targets,
             first_keyframe=not self.keyframes,
             exemplar_mode=self.pc.exemplar_mode,
         )
@@ -382,42 +457,59 @@ class PKCAgent(DefaultAgent):
         return {k: ", ".join(v[:3]) + (" ..." if len(v) > 3 else "") for k, v in out.items()}
 
     def _prepare(self, step: int, reason: str, commit: bool = False) -> tuple[FoldPlan, WorkingSet, str]:
-        labels = self._labels()
+        labels = self._labels(step)
         hi = step - self.pc.keep_turns - (2 if self._pff_high() else 0)
         planner = Planner(
             self.ledger.records, labels, self.pc.search_hits_per_stub, self.pc.outline_max_defs, self._edit_stats()
         )
-        plan = planner.plan(self.last_kf_step, hi, self.pc.fold_edit_commands, self.pc.edit_stub_min_chars)
+        plan = planner.plan(self.fold_hi, hi, self.pc.fold_edit_commands, self.pc.edit_stub_min_chars)
         ws = self._working_set(step, plan)
         return plan, ws, self._frozen(len(self.keyframes) + 1, step, reason, plan, labels, commit)
 
-    def _break_even(self, plan: FoldPlan, ws: WorkingSet, frozen: str) -> bool:
+    def _reasoning_folds(self, hi: int) -> list[tuple[dict, str]]:
+        """(assistant message, stub) for every unfolded reasoning of a step up to `hi`."""
+        if not self.pc.fold_reasoning:
+            return []
+        out = []
+        for s, msg in self.step_msgs.items():
+            text = msg.get("reasoning_content")
+            if s > hi or not isinstance(text, str) or "pkc_original_reasoning" in msg.get("extra", {}):
+                continue
+            notes = "\n".join(m.group(0) for m in NOTE_BLOCK.finditer(text))
+            stub = f"[reasoning of step {s} folded]" + (f"\n{notes}" if notes else "")
+            if len(text) > len(stub) + 100:
+                out.append((msg, stub))
+        return out
+
+    def _worth_it(self, plan: FoldPlan, ws: WorkingSet, frozen: str) -> bool:
         min_gain = self.pc.min_gain * (2 if self._pff_high() else 1)
-        R = plan.saved_chars / self.cpt
+        thoughts = self._reasoning_folds(plan.hi)
+        R = (plan.saved_chars + sum(len(m["reasoning_content"]) - len(s) for m, s in thoughts)) / self.cpt
         replaced = (
             len(self.keyframes[-1].ws.text) - 200 if self.keyframes and self.keyframes[-1].superseded is None else 0
         )
         W = (len(frozen) + len(ws.text) + len(FOOTER) - replaced) / self.cpt
         if R - W < min_gain:
+            self.stats["skipped_min_gain"] += 1
             return False
         if not self.pc.break_even:
             return True
         h, w = self.pc.hit_ratio, self.pc.write_ratio
-        P = self.prompt_tokens or sum(map(_chars, self.messages)) / self.cpt
-        pos = self._position(plan) / self.cpt
-        return (R - W) * h * self.n_calls >= (w - h) * max(0.0, P - R - pos) + max(0.0, W) * (1 - h)
+        P = self._context_tokens()
+        pos = self._position(plan, [m for m, _ in thoughts]) / self.cpt
+        if (R - W) * h * self.n_calls >= (w - h) * max(0.0, P - R - pos) + max(0.0, W) * (1 - h):
+            return True
+        self.stats["skipped_break_even"] += 1
+        return False
 
-    def _position(self, plan: FoldPlan) -> int:
+    def _position(self, plan: FoldPlan, thoughts: list[dict]) -> int:
         index_of = {id(m): i for i, m in enumerate(self.messages)}
         offsets, total = [], 0
         for m in self.messages:
             offsets.append(total)
             total += _chars(m)
-        cands = [
-            offsets[index_of[id(m)]]
-            for item in plan.items
-            if (m := item.rec.obs_msg if item.kind == "obs" else item.rec.act_msg) is not None and id(m) in index_of
-        ]
+        changed = [item.rec.obs_msg if item.kind == "obs" else item.rec.act_msg for item in plan.items] + thoughts
+        cands = [offsets[index_of[id(m)]] for m in changed if m is not None and id(m) in index_of]
         if self.keyframes and id(host := self.hosts[-1].obs_msg) in index_of:
             ws_chars = len(self.keyframes[-1].ws.text) + len(FOOTER)
             cands.append(offsets[index_of[id(host)]] + max(0, _chars(host) - ws_chars))
@@ -437,6 +529,11 @@ class PKCAgent(DefaultAgent):
                 self.stats["folded_outputs"] += 1
             elif self._stub_command(rec, item.text):
                 self.stats["folded_edits"] += 1
+        for msg, stub in self._reasoning_folds(plan.hi):
+            msg.setdefault("extra", {})["pkc_original_reasoning"] = msg["reasoning_content"]
+            self.stats["reasoning_saved_chars"] += len(msg["reasoning_content"]) - len(stub)
+            self.stats["folded_reasoning"] += 1
+            msg["reasoning_content"] = stub
         if self.keyframes:
             _save_original(self.hosts[-1].obs_msg)
             self.stats["saved_chars"] += self.keyframes[-1].supersede(n)
@@ -445,7 +542,8 @@ class PKCAgent(DefaultAgent):
         host.appendix.append(kf)
         self.keyframes.append(kf)
         self.hosts.append(host)
-        self.last_kf_step = step
+        self.last_kf_step, self.fold_hi = step, max(self.fold_hi, plan.hi)
+        self.kf_reasons.append(reason)
         self.stats["keyframes"] += 1
         self.stats["saved_chars"] += plan.saved_chars
 
@@ -479,7 +577,8 @@ class PKCAgent(DefaultAgent):
             n_lines = len(contents.get(p, "").splitlines())
             for a, b in self.files.changed_lines(p):
                 inside = [s for s in idx.get(p, []) if s.start <= b and a <= s.end]
-                lo, hi = max(1, a - 3), min(n_lines, b + 3)
+                ctx_lines = self.pc.ws_hunk_context
+                lo, hi = max(1, a - ctx_lines), min(n_lines, b + ctx_lines)
                 cands += [Candidate(1, p, s) for s in inside] or [Candidate(1, p, Symbol(f"<lines {lo}-{hi}>", lo, hi))]
         for prio, pairs in ((2, cp_targets), (3, cp_exemplars), (5, hot_syms)):
             cands += [Candidate(prio, p, s) for p, n in pairs if (s := find(idx.get(p, []), n))]
@@ -510,24 +609,27 @@ class PKCAgent(DefaultAgent):
         records = self.ledger.records
         seg = [r for r in records if plan.lo < r.step <= plan.hi]
         paths = list(dict.fromkeys(p for r in seg for p in [*r.read_paths, *r.edit_files]))
-        locations = []
+        ranked = []
         for p in paths:
             eids = sorted({e.eid for e in self.files.edits if e.path == p and e.eid and plan.lo < e.step <= step})
             reads = [r.id for r in seg if p in r.read_paths]
             if p in self.files.content:
                 defs = [(s.name, s.start, s.end) for s in index(p, self.files.content[p]) if "." not in s.name]
             else:
-                defs = next((r.outline for r in reversed(seg) if p in r.read_paths and r.outline), [])
+                defs = next((r.outlines[p] for r in reversed(seg) if r.outlines.get(p)), [])
             shown = ", ".join(f"{name} L{a}-{b}" for name, a, b in defs[:4])
             if eids:
-                status = f"edited ({', '.join(f'e{e}' for e in eids)})"
-            elif p in labels.exemplars:
-                status = "exemplar (CP)"
+                rank, status = 0, f"edited ({', '.join(f'e{e}' for e in eids)})"
             elif p in labels.targets:
-                status = "target (CP)"
+                rank, status = 1, "target (CP)"
+            elif p in labels.exemplars:
+                rank, status = 2, "exemplar (CP)"
             else:
+                rank = 3 if p in labels.recent else 4
                 status = f"read {', '.join(reads[:3])}, not edited" if reads else "touched"
-            locations.append(f"{p}   {shown}   {status}".replace("      ", "   "))
+            last = max(r.step for r in seg if p in r.read_paths or p in r.edit_files)
+            ranked.append((rank, -last, f"{p}   {shown}   {status}".replace("      ", "   ")))
+        locations = [line for _, _, line in sorted(ranked, key=lambda x: x[:2])]
         for item in plan.items:
             if item.kind == "obs" and item.rec.category == "search":
                 total, hits = search_summary(item.rec.raw, self.pc.search_hits_per_stub)
@@ -568,7 +670,7 @@ class PKCAgent(DefaultAgent):
         )
         c = self.cpt
         sections = [
-            (f"Files and locations (segment {plan.lo + 1}-{plan.hi})   [frozen]", locations, int(1600 * c)),
+            (f"Files and locations (segment {plan.lo + 1}-{plan.hi})   [frozen]", locations, int(1000 * c)),
             (f"Edits since {f'K{n - 1}' if n > 1 else 'start'}   [frozen]", edits, int(600 * c)),
             ("Verification   [frozen]", verification, int(400 * c)),
             ("Hypotheses and plan (model delta, validated)   [frozen]", hypotheses, int(300 * c)),

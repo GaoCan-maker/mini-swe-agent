@@ -10,10 +10,11 @@ T0 = """Context management in this environment:
   code or line numbers in it. As evidence, copy the id of the output you rely on (o12, e7) or name the file
   (path or path::symbol)."""
 
-T1 = """
+T0_REASONING = """
+- When old outputs are folded, your own older reasoning is shortened to a one-line stub as well; the <checkpoint>
+  and <delta> blocks in it are kept."""
 
-[environment] You made your first change to the repository. In your next reply, before your command, write:
-<checkpoint>
+CHECKPOINT = """<checkpoint>
 TARGETS: every path::symbol you expect to modify, in order, including ones not touched yet
 EXEMPLARS: up to 5 pointers (path::symbol + a few words) to existing code you will NOT modify but will imitate
            or call: similar implementations, helper signatures, test cases to copy, registration tables. No code.
@@ -21,12 +22,9 @@ RULED_OUT: hypotheses or locations you rejected; evidence = output id (e.g. o14)
 UNVERIFIED: assumptions you have not checked yet; evidence = output id or path
 DONE_WHEN: observable behaviour and the test command that shows the task is done
 </checkpoint>
-One line per item, at most 400 tokens, no code, no line numbers. Then continue normally."""
+One line per item, at most 400 tokens, no code, no line numbers."""
 
-T2 = """
-
-[environment] Older context will be folded after your next reply. Before your command, write:
-<delta>
+DELTA = """<delta>
 DONE: checkpoint TARGETS that are finished; evidence = edit id (e.g. e7) or path::symbol
 CONFIRMED: new findings since the last checkpoint or keyframe; evidence = output id or path
 REJECTED: hypotheses you now rejected; evidence = output id or path
@@ -35,6 +33,21 @@ KEEP: up to 5 output ids whose exact text you still need
 UNVERIFIED: open assumptions
 </delta>
 At most 300 tokens, no code, no line numbers."""
+
+T1 = (
+    "\n\n[environment] You made your first change to the repository. In your next reply, before your command, write:\n"
+    + CHECKPOINT
+    + " Then continue normally."
+)
+
+T2 = "\n\n[environment] Older context will be folded after your next reply. Before your command, write:\n" + DELTA
+
+T2_FIRST = (
+    "\n\n[environment] Older context will be folded after your next reply. Before your command, write both blocks:\n"
+    + CHECKPOINT
+    + "\n"
+    + DELTA
+)
 
 
 def t4(kind: str, problems: list[str]) -> str:

@@ -21,6 +21,7 @@ class Labels:
     ruled_out: dict[str, str] = field(default_factory=dict)
     keep: set[str] = field(default_factory=set)
     hot: set[str] = field(default_factory=set)
+    recent: set[str] = field(default_factory=set)
     first_keyframe: bool = True
     exemplar_mode: str = "working_set"
 
@@ -182,8 +183,6 @@ class Planner:
         labels = self.labels
         whole = pid == rec.id
         paths = rec.read_paths if whole else [path]
-        if any(p in labels.hot for p in paths):
-            return None
         mine = next((s.read for s in rec.segments if s.read and s.read[0] == path), (path, 1, None))
         reads = [s.read for s in rec.segments if s.read] if whole else [mine]
         later = [
@@ -199,6 +198,8 @@ class Planner:
         ]
         if reads and all(later):
             return f"[{pid} superseded by {max(later, key=lambda r: r.oid).id}] {short(rec.cmd)} | ctx show {pid}"
+        if any(p in labels.hot or p in labels.recent for p in paths):
+            return None
         if labels.exemplar_mode == "keep" and any(p in labels.exemplars for p in paths):
             return None
         is_target = path in labels.targets
@@ -211,6 +212,8 @@ class Planner:
         ):
             return None
         rec.outline = outline(text, mine[1], self.outline_defs)
+        if len(paths) == 1:
+            rec.outlines[path] = rec.outline
         shown = ", ".join(f"{n} L{a}-{b}" for n, a, b in rec.outline)
         n_lines = text.count("\n") + 1
         return (

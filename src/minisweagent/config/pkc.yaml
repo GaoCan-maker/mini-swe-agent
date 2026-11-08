@@ -8,15 +8,22 @@ agent:
     min_steps: 10
     min_gap: 5
     min_gain: 1500
+    min_prompt_tokens: 64000  # phase triggers below this prompt size are dropped; 0 disables
+    pressure_prompt_tokens: 100000  # fold whenever the prompt reaches this size; 0 disables
+    defer_edit_burst: true
+    max_defer: 8
     keep_turns: 3
-    e1_checkpoint: true
+    keep_recent_steps: 5
+    checkpoint_at: first_fold  # e1 | first_fold | never
     fold_edit_commands: true
+    fold_reasoning: true
     exemplar_mode: working_set
-    break_even: true
+    break_even: false  # true also requires each fold to pay off under prompt caching
     hit_ratio: 0.1
     write_ratio: 1.0  # set to 1.25 for Anthropic
-    ws_budget: 8000
+    ws_budget: 4000
     ws_symbol_max_lines: 150
+    ws_hunk_context: 10
     checkpoint_max_tokens: 400
     delta_max_tokens: 300
     ctx:
