@@ -1,18 +1,16 @@
 T0 = """Context management in this environment:
 - Every command output carries an id (e.g. "id": "o12" or a leading #o12). Outputs of commands that changed files
   also carry an edit id (e.g. "edit_id": "e7" or #e7).
-- At some points the environment will fold old outputs into one-line stubs and add a <keyframe> message that
-  contains the current code of the files you are working on (re-read from disk), a location map, an edit log
-  and the test status. Code shown in a keyframe is exact and current.
-- Any folded item can be restored exactly with:  ctx show o12 | ctx show e7 | ctx show <path>::<symbol> | ctx show <path>:<a>-<b>
-  ctx is an ordinary shell command: you can pipe it, redirect it, or combine it with other commands.
+- At a few points the environment removes older turns (your messages, reasoning, commands and their outputs) from
+  the context and replaces them by a single <keyframe> message. It contains a history index with the ids of the
+  removed outputs, the current code of the files you are working on (re-read from disk), a location map, the edit
+  log, the test status and your own notes. Code shown in a keyframe is exact and current; only the latest keyframe
+  is kept.
+- Any removed output can be restored exactly with:  ctx show o12 | ctx show e7 | ctx show <path>::<symbol> | ctx show <path>:<a>-<b>
+  ctx list lists all removed ids. ctx is an ordinary shell command: you can pipe it or combine it with other commands.
 - When asked for a <checkpoint> or <delta>, put it in your reasoning text, before your command. Do not include
   code or line numbers in it. As evidence, copy the id of the output you rely on (o12, e7) or name the file
-  (path or path::symbol)."""
-
-T0_REASONING = """
-- When old outputs are folded, your own older reasoning is shortened to a one-line stub as well; the <checkpoint>
-  and <delta> blocks in it are kept."""
+  (path or path::symbol). The keyframe keeps these notes after the turns that contained them are removed."""
 
 CHECKPOINT = """<checkpoint>
 TARGETS: every path::symbol you expect to modify, in order, including ones not touched yet
@@ -40,13 +38,14 @@ T1 = (
     + " Then continue normally."
 )
 
-T2 = "\n\n[environment] Older context will be folded after your next reply. Before your command, write:\n" + DELTA
+T2 = (
+    "\n\n[environment] Older turns will be removed from the context after your next reply and replaced by a keyframe."
+    " Before your command, write:\n" + DELTA
+)
 
 T2_FIRST = (
-    "\n\n[environment] Older context will be folded after your next reply. Before your command, write both blocks:\n"
-    + CHECKPOINT
-    + "\n"
-    + DELTA
+    "\n\n[environment] Older turns will be removed from the context after your next reply and replaced by a keyframe."
+    " Before your command, write both blocks:\n" + CHECKPOINT + "\n" + DELTA
 )
 
 

@@ -5,14 +5,6 @@ from minisweagent.agents.pkc.commands import Segment, parse_command, record_cate
 
 
 @dataclass
-class Part:
-    pid: str
-    text: str
-    category: str
-    path: str | None = None
-
-
-@dataclass
 class Record:
     """One tool call: command, full output and the messages that show it."""
 
@@ -30,13 +22,8 @@ class Record:
     act_msg: dict | None = None
     base_content: str = ""
     appendix: list = field(default_factory=list)
-    parts: list[Part] | None = None
-    stub: str | None = None
-    cmd_stub: str | None = None
-    folded_at: int | None = None
-    outline: list[tuple[str, int, int]] = field(default_factory=list)
-    outlines: dict[str, list[tuple[str, int, int]]] = field(default_factory=dict)
-    """Outline per read path, only for folded units that show a single file."""
+    hidden_at: int | None = None
+    """Step of the fold that removed this record's turn from the context."""
 
     @property
     def id(self) -> str:
@@ -53,11 +40,6 @@ class Record:
     @property
     def read_paths(self) -> list[str]:
         return list(dict.fromkeys(s.read[0] for s in self.segments if s.read))
-
-    @property
-    def visible(self) -> str:
-        """Output text the model currently sees for this record."""
-        return self.stub if self.stub is not None else self.raw
 
     def render(self) -> None:
         if self.obs_msg is not None:
@@ -81,22 +63,17 @@ class Ledger:
         return self.n_edits
 
     def get(self, ref: str) -> Record | None:
-        if m := re.fullmatch(r"#?o(\d+)(?:\.\d+)?", ref):
+        if m := re.fullmatch(r"#?o(\d+)", ref):
             return self.records[int(m.group(1))] if int(m.group(1)) < len(self.records) else None
         if m := re.fullmatch(r"#?e(\d+)", ref):
             return next((r for r in self.records if r.eid == int(m.group(1))), None)
         return None
 
     def restore_text(self, ref: str) -> str | None:
-        """Exact original text behind an id: output for oK / oK.N, command for eK."""
+        """Exact original text behind an id: output for oK, command for eK."""
         if (rec := self.get(ref)) is None:
             return None
-        ref = ref.lstrip("#")
-        if ref.startswith("e"):
-            return rec.cmd
-        if "." in ref:
-            return next((p.text for p in rec.parts or [] if p.pid == ref), None)
-        return rec.raw
+        return rec.cmd if ref.lstrip("#").startswith("e") else rec.raw
 
     def latest_with(self, needle: str) -> Record | None:
         return next((r for r in reversed(self.records) if needle in r.raw or needle in r.cmd), None)

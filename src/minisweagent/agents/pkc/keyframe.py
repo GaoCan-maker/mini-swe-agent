@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 from minisweagent.agents.pkc.symbols import Symbol
 
 FOOTER = (
-    "\nFolded items keep a one-line stub in place; restore any of them with: "
-    "ctx show <id> | ctx show <path>::<symbol> | ctx show <path>:<a>-<b>\n</keyframe>"
+    "\nOnly this keyframe is kept; it replaces every removed turn. Restore any removed output exactly with: "
+    "ctx show <id> | ctx show <path>::<symbol> | ctx show <path>:<a>-<b> | ctx list\n</keyframe>"
 )
 
 
@@ -41,16 +41,15 @@ class Keyframe:
     superseded: str | None = None
 
     def __str__(self) -> str:
-        return self.frozen + (self.superseded if self.superseded is not None else self.ws.text) + FOOTER
+        if self.superseded is not None:
+            return self.superseded
+        return self.frozen + self.ws.text + FOOTER
 
     def supersede(self, by: int) -> int:
-        """Replace the working set by a one-line stub; returns the number of characters removed."""
-        names = ", ".join(self.ws.symbols[:12]) + (" ..." if len(self.ws.symbols) > 12 else "")
-        self.superseded = (
-            f"[K{self.n} working set superseded by K{by}] {names or '(empty)'} | "
-            "current code: newer keyframe working set or ctx show <path>::<symbol>\n"
-        )
-        return len(self.ws.text) - len(self.superseded)
+        """Replace the whole keyframe by a one-line stub; returns the number of characters removed."""
+        before = len(str(self))
+        self.superseded = f"\n\n[keyframe K{self.n} superseded by K{by}]"
+        return before - len(self.superseded)
 
 
 def build_working_set(
@@ -85,9 +84,7 @@ def build_working_set(
         names += [f"{b.path}::{n}" for n in b.names]
         used += len(text)
     body = "".join(out) + "".join(s + "\n" for s in see)
-    return WorkingSet(
-        "## Working set (current code, re-read from disk)            [replaceable at next keyframe]\n" + body, names
-    )
+    return WorkingSet("## Working set (current code, re-read from disk)\n" + body, names)
 
 
 def _nest(cands: list[Candidate], max_lines: int) -> list[Block]:
@@ -128,11 +125,9 @@ def _numbered(nums: list[int], lines: list[str]) -> str:
     return "".join(f"{n}\t{lines[n - 1]}\n" for n in nums)
 
 
-def frozen_text(n: int, step: int, reason: str, lo: int, hi: int, sections: list[tuple[str, list[str], int]]) -> str:
+def frozen_text(n: int, step: int, reason: str, hi: int, sections: list[tuple[str, list[str], int]]) -> str:
     """`sections` holds (title, lines, character budget); empty sections are omitted."""
-    head = (
-        f'\n\n<keyframe id="K{n}" step="{step}" reason="{reason}" folded_from_step="{lo + 1}" folded_to_step="{hi}">\n'
-    )
+    head = f'\n\n<keyframe id="K{n}" step="{step}" reason="{reason}" removed_steps="1-{hi}">\n'
     out = []
     for title, lines, budget in sections:
         if not lines:
