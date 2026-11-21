@@ -1,0 +1,10 @@
+agent:
+  agent_class: synapse
+  synapse:
+    enabled: true
+    sync_events: false
+    footer: false
+    line_guard: false
+    submit_gate: false
+    delta_read: false
+    evict: false

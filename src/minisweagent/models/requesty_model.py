@@ -25,7 +25,7 @@ logger = logging.getLogger("requesty_model")
 class RequestyModelConfig(BaseModel):
     model_name: str
     model_kwargs: dict[str, Any] = {}
-    set_cache_control: Literal["default_end"] | None = None
+    set_cache_control: Literal["default_end", "last_two"] | None = None
     """Set explicit cache control markers, for example for Anthropic models"""
     format_error_template: str = "{{ error }}"
     """Template used when the LM's output is not in the expected format."""

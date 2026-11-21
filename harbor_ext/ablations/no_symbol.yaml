@@ -1,0 +1,5 @@
+agent:
+  agent_class: synapse
+  synapse:
+    enabled: true
+    symbol_level: false

@@ -25,7 +25,7 @@ logger = logging.getLogger("openrouter_model")
 class OpenRouterModelConfig(BaseModel):
     model_name: str
     model_kwargs: dict[str, Any] = {}
-    set_cache_control: Literal["default_end"] | None = None
+    set_cache_control: Literal["default_end", "last_two"] | None = None
     """Set explicit cache control markers, for example for Anthropic models"""
     cost_tracking: Literal["default", "ignore_errors"] = os.getenv("MSWEA_COST_TRACKING", "default")
     """Cost tracking mode for this model. Can be "default" or "ignore_errors" (ignore errors/missing cost info)"""

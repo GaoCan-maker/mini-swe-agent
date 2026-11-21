@@ -47,21 +47,30 @@ def _set_cache_control(entry: dict) -> None:
 
 
 def set_cache_control(
-    messages: list[dict], *, mode: Literal["default_end"] | None = "default_end", last_n_messages_offset: int = 0
+    messages: list[dict],
+    *,
+    mode: Literal["default_end", "last_two"] | None = "default_end",
+    last_n_messages_offset: int = 0,
 ) -> list[dict]:
-    """This messages processor adds manual cache control marks to the messages."""
+    """This messages processor adds manual cache control marks to the messages.
+
+    `default_end` marks the last message. `last_two` additionally marks the second-to-last message, so that a
+    transient trailing message (which is dropped again on the next call) does not cost the cache hit on the
+    persistent history before it.
+    """
     if mode is None:
         return messages
-    if mode != "default_end":
+    if mode not in ("default_end", "last_two"):
         raise ValueError(f"Invalid mode: {mode}")
     if last_n_messages_offset:
         warnings.warn("last_n_messages_offset is deprecated and will be removed in the future. It has no effect.")
 
+    n_marks = 2 if mode == "last_two" else 1
     messages = copy.deepcopy(messages)
     new_messages = []
     for i_entry, entry in enumerate(reversed(messages)):
         _clear_cache_control(entry)
-        if i_entry == 0:
+        if i_entry < n_marks:
             _set_cache_control(entry)
         new_messages.append(entry)
     return list(reversed(new_messages))

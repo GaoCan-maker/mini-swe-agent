@@ -47,7 +47,7 @@ class PortkeyModelConfig(BaseModel):
     doesn't match the Portkey model name.
     Note that this might change if we get better support for Portkey and change how we calculate costs.
     """
-    set_cache_control: Literal["default_end"] | None = None
+    set_cache_control: Literal["default_end", "last_two"] | None = None
     """Set explicit cache control markers, for example for Anthropic models"""
     cost_tracking: Literal["default", "ignore_errors"] = os.getenv("MSWEA_COST_TRACKING", "default")
     """Cost tracking mode for this model. Can be "default" or "ignore_errors" (ignore errors/missing cost info)"""
