@@ -1,0 +1,4 @@
+agent:
+  agent_class: req
+  req:
+    enabled: true
